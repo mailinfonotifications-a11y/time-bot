@@ -81,7 +81,7 @@ async def on_presence_update(before, after):
             prev_status, start_time = active_sessions[user_id]
             duration = (now - start_time).total_seconds()
             
-            if duration >= 300: # 5分以上
+            if duration >= 60: # 5分以上
                 status_jp = {"online": "オンライン", "idle": "退席中", "dnd": "取り込み中"}.get(str(prev_status), "アクティブ")
                 add_to_calendar(status_jp, start_time, now)
         
