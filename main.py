@@ -1,5 +1,5 @@
 import discord
-from discord import app_commands # スラッシュコマンド用に使う
+from discord import app_commands
 from discord.ext import tasks
 import datetime
 import os
@@ -27,11 +27,9 @@ class MyBot(discord.Client):
         intents.presences = True
         intents.members = True
         super().__init__(intents=intents)
-        # スラッシュコマンドの同期用
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # 起動時にスラッシュコマンドをDiscordに登録
         await self.tree.sync()
 
 client = MyBot()
@@ -40,12 +38,14 @@ active_sessions = {}
 # --- 2. ユーティリティ関数 ---
 def add_to_calendar(status_name, start, end):
     try:
+        print(f"--- Google Calendar API Calling: [{status_name}] ---")
         event = {
             'summary': f'[{status_name}]',
             'start': {'dateTime': start.isoformat() + 'Z'},
             'end': {'dateTime': end.isoformat() + 'Z'},
         }
         service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
+        print("Success: Event created on Google Calendar.")
     except Exception as e:
         print(f"Calendar API Error: {e}")
 
@@ -54,45 +54,65 @@ def add_to_calendar(status_name, start, end):
 async def status(interaction: discord.Interaction):
     embed = discord.Embed(title="Bot Status Report", color=discord.Color.blue())
     embed.add_field(name="Google Calendar ID", value=f"`{CALENDAR_ID}`", inline=False)
-    
-    # 現在監視中の人数
-    monitoring_count = len(active_sessions)
-    embed.add_field(name="Monitoring Users", value=f"{monitoring_count}人", inline=True)
-    
-    # システム稼働時間
+    embed.add_field(name="Monitoring Users", value=f"{len(active_sessions)}人", inline=True)
     embed.add_field(name="System", value="Online ✅", inline=True)
-    
     await interaction.response.send_message(embed=embed)
 
 # --- 4. イベント & ループ ---
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user.name}')
+    
+    # 起動時にオンラインのメンバーをスキャン
+    now = datetime.datetime.utcnow()
+    for guild in client.guilds:
+        for member in guild.members:
+            if not member.bot and str(member.status) != "offline":
+                active_sessions[member.id] = (member.status, now)
+                print(f"Monitoring Initialized for: {member.name} ({member.status})")
+
     if not weekly_report_task.is_running():
         weekly_report_task.start()
 
 @client.event
 async def on_presence_update(before, after):
+    # ステータス変化をすべてログに表示（デバッグ用）
+    if before.status == after.status:
+        return
+
     now = datetime.datetime.utcnow()
     user_id = after.id
+    print(f"Presence Change: {after.name} ({before.status} -> {after.status})")
 
-    if before.status != after.status:
-        if user_id in active_sessions:
-            prev_status, start_time = active_sessions[user_id]
-            duration = (now - start_time).total_seconds()
-            
-            if duration >= 60: # 5分以上
-                status_jp = {"online": "オンライン", "idle": "退席中", "dnd": "取り込み中"}.get(str(prev_status), "アクティブ")
-                add_to_calendar(status_jp, start_time, now)
+    # 1. 前のステータスセッションを終了して記録
+    if user_id in active_sessions:
+        prev_status, start_time = active_sessions[user_id]
+        duration = (now - start_time).total_seconds()
+        print(f"Session End for {after.name}. Duration: {duration:.1f}s")
         
-        if str(after.status) != "offline":
-            active_sessions[user_id] = (after.status, now)
+        if duration >= 60: # 1分以上
+            print(f"Duration {duration}s >= 60s. Writing to Calendar...")
+            status_jp = {"online": "オンライン", "idle": "退席中", "dnd": "取り込み中"}.get(str(prev_status), "アクティブ")
+            add_to_calendar(status_jp, start_time, now)
         else:
-            active_sessions.pop(user_id, None)
+            print("Duration too short (< 60s). Skipping calendar write.")
+    
+    # 2. 新しいステータスセッションを開始
+    if str(after.status) != "offline":
+        active_sessions[user_id] = (after.status, now)
+        print(f"New Session Started for {after.name}: {after.status}")
+    else:
+        active_sessions.pop(user_id, None)
+        print(f"{after.name} went Offline. Session removed.")
 
 @tasks.loop(time=datetime.time(hour=0, minute=0))
 async def weekly_report_task():
-    # (中身は前のコードと同じなので省略。貼り付ける際は前のコードのままでOKです)
+    # 日曜チェックなどは前と同じ
+    now = datetime.datetime.utcnow()
+    if now.weekday() != 6: return
+    channel = client.get_channel(REPORT_CHANNEL_ID)
+    if not channel: return
+    # (集計処理は省略せずに前のロジックを維持してください。ここでは長くなるため概略のみ)
     pass
 
 # --- 5. Flask ---
