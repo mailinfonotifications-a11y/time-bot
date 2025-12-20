@@ -1,0 +1,10 @@
+# Google APIの鍵ファイル（絶対に公開しない）
+credentials.json
+token.json
+
+# Pythonのキャッシュ
+__pycache__/
+*.py[cod]
+
+# 環境設定ファイル
+.env
