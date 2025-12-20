@@ -1,1 +1,5 @@
-pip freeze > requirements.txt
+discord.py
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+flask
