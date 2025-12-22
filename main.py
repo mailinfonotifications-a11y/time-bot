@@ -50,7 +50,7 @@ class MyBot(commands.Bot):
         channel = self.get_channel(REPORT_CHANNEL_ID)
         if not channel: return
         for user_id in list(user_status_start.keys()):
-            embed, file = await create_report_data(user_id, "📅 本日の活動最終日報")
+            embed, file = await create_report_data(user_id, "📅 本日の最終活動レポート")
             if embed:
                 await channel.send(embed=embed, file=file)
 
@@ -77,7 +77,7 @@ def add_to_calendar(summary, start_time, end_time, color_id="1"):
         print(f"CALENDAR ERROR: {e}")
 
 async def get_activity_data_from_calendar(start_dt, end_dt):
-    """カレンダーからステータス別の秒数と、1時間ごとの合計秒数を集計"""
+    """指定期間のカレンダーからステータス別の秒数と、1時間ごとの合計秒数を算出"""
     try:
         events_result = service.events().list(
             calendarId=CALENDAR_ID,
@@ -90,6 +90,7 @@ async def get_activity_data_from_calendar(start_dt, end_dt):
 
         hourly_data = {i: 0 for i in range(24)}
         status_totals = {"オンライン": 0, "退席中": 0, "取り込み中": 0}
+        active_days = set()
 
         for event in events:
             summary = event.get('summary')
@@ -97,7 +98,6 @@ async def get_activity_data_from_calendar(start_dt, end_dt):
 
             s_str = event['start'].get('dateTime', event['start'].get('date'))
             e_str = event['end'].get('dateTime', event['end'].get('date'))
-            
             s = datetime.datetime.fromisoformat(s_str.replace('Z', '+00:00')).astimezone(datetime.timezone(datetime.timedelta(hours=9)))
             e = datetime.datetime.fromisoformat(e_str.replace('Z', '+00:00')).astimezone(datetime.timezone(datetime.timedelta(hours=9)))
             
@@ -105,6 +105,7 @@ async def get_activity_data_from_calendar(start_dt, end_dt):
             limit = min(e, end_dt)
             
             if curr < limit:
+                active_days.add(curr.date())
                 dur = (limit - curr).total_seconds()
                 status_totals[summary] += dur
                 
@@ -113,10 +114,11 @@ async def get_activity_data_from_calendar(start_dt, end_dt):
                     next_h = (it + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
                     hourly_data[it.hour] += (min(limit, next_h) - it).total_seconds()
                     it = min(limit, next_h)
-        return hourly_data, status_totals
+                    
+        return hourly_data, status_totals, len(active_days)
     except Exception as e:
         print(f"FETCH ERROR: {e}")
-        return {i: 0 for i in range(24)}, {"オンライン": 0, "退席中": 0, "取り込み中": 0}
+        return {i: 0 for i in range(24)}, {"オンライン": 0, "退席中": 0, "取り込み中": 0}, 0
 
 async def create_report_data(user_id, title_prefix):
     user = bot.get_user(user_id)
@@ -125,10 +127,10 @@ async def create_report_data(user_id, title_prefix):
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # 今日のデータ取得
-    today_hourly, today_status = await get_activity_data_from_calendar(today_start, now)
+    # 1. 今日のデータ（カレンダーから取得）
+    today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now)
     
-    # 継続中のステータスを加算
+    # 2. 現在進行中のステータス分を上乗せ（0時跨ぎ対応）
     if user_id in user_status_start:
         info = user_status_start[user_id]
         st_map = {"online": "オンライン", "idle": "退席中", "dnd": "取り込み中"}
@@ -144,18 +146,20 @@ async def create_report_data(user_id, title_prefix):
                     today_hourly[it.hour] += (min(now, next_h) - it).total_seconds()
                     it = min(now, next_h)
 
-    # 14日平均のデータ取得
+    # 3. 過去14日間の平均（データがある日数で割る）
     hist_start = today_start - datetime.timedelta(days=14)
-    hist_hourly, _ = await get_activity_data_from_calendar(hist_start, today_start)
-    avg_hourly = {h: sec / 14 for h, sec in hist_hourly.items()}
+    hist_hourly, _, active_days_count = await get_activity_data_from_calendar(hist_start, today_start)
+    
+    divisor = active_days_count if active_days_count > 0 else 1
+    avg_hourly = {h: sec / divisor for h, sec in hist_hourly.items()}
     avg_total_day = sum(avg_hourly.values())
 
     # グラフ作成
     plt.figure(figsize=(10, 5))
     plt.style.use('dark_background')
     plt.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='Today', alpha=0.7)
-    plt.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label='14-day Average', linewidth=2)
-    plt.title(f"Activity Analysis: {user.display_name}", color='white', fontsize=15)
+    plt.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label=f'{divisor}-day Avg', linewidth=2)
+    plt.title(f"Activity Analysis: {user.display_name}", color='white', fontsize=14)
     plt.xlabel("Hour (0-23)", color='white')
     plt.ylabel("Minutes", color='white')
     plt.xticks(range(24), [f"{i}h" for i in range(24)], color='white')
@@ -168,21 +172,18 @@ async def create_report_data(user_id, title_prefix):
     plt.close()
     
     total_today = sum(today_status.values())
-    diff_text = "データ蓄積中"
-    if avg_total_day > 0:
-        percent = (total_today / avg_total_day) * 100
-        diff_text = f"平均の **{percent:.1f}%** 活動"
+    efficiency = f"平均の **{(total_today/avg_total_day*100):.1f}%**" if avg_total_day > 0 else "データ蓄積中"
 
     file = discord.File(buf, filename="graph.png")
     embed = discord.Embed(title=f"{title_prefix}", color=0x5865F2, timestamp=now)
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-    embed.add_field(name="📊 今日の活動効率", value=diff_text, inline=False)
+    embed.add_field(name="📊 活動効率", value=efficiency, inline=False)
     embed.add_field(name="🟢 オンライン", value=format_time(today_status["オンライン"]), inline=True)
     embed.add_field(name="🌙 退席中", value=format_time(today_status["退席中"]), inline=True)
     embed.add_field(name="⛔ 取り込み中", value=format_time(today_status["取り込み中"]), inline=True)
-    embed.add_field(name="⌚ 合計活動時間", value=format_time(total_today), inline=False)
+    embed.add_field(name="⌛ 今日これまでの合計", value=format_time(total_today), inline=False)
     embed.set_image(url="attachment://graph.png")
-    embed.set_footer(text="Powered by Google Calendar Sync")
+    embed.set_footer(text=f"Past {divisor} active days used for average")
     
     return embed, file
 
