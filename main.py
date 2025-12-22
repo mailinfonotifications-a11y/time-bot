@@ -50,39 +50,29 @@ class MyBot(commands.Bot):
         channel = self.get_channel(REPORT_CHANNEL_ID)
         if not channel: return
         for user_id in list(user_status_start.keys()):
-            embed, file = create_report_data(user_id, "📅 本日の最終レポート")
+            embed, file = await create_report_data(user_id, "📅 本日の活動日報")
             if embed:
                 await channel.send(embed=embed, file=file)
-        # 1日の終わりに履歴へ移行
-        archive_data()
+        # 日付が変わるのでメモリ内の当日統計をリセット
+        user_hourly_data.clear()
+        user_total_stats.clear()
 
 bot = MyBot()
 
 # --- データ管理 ---
-user_hourly_data = {} # {user_id: {hour: seconds}}
-user_history = {}     # {user_id: [data_dict, ...]} 14日分
+user_hourly_data = {} # 今日のメモリ内集計
 user_status_start = {}
 user_total_stats = {} 
 last_reset_date = {}
 
-def archive_data():
-    """データを履歴に保存してリセット"""
-    for uid in list(user_hourly_data.keys()):
-        if uid not in user_history: user_history[uid] = []
-        user_history[uid].append(user_hourly_data[uid].copy())
-        if len(user_history[uid]) > 14:
-            user_history[uid].pop(0)
-    user_hourly_data.clear()
-    user_total_stats.clear()
-
 def check_day_reset(user_id):
-    """日付変更を確認して必要ならリセット"""
     now_date = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).date()
     if user_id not in last_reset_date:
         last_reset_date[user_id] = now_date
         return
     if last_reset_date[user_id] != now_date:
-        archive_data()
+        user_hourly_data.clear()
+        user_total_stats.clear()
         last_reset_date[user_id] = now_date
 
 def format_time(seconds):
@@ -98,17 +88,63 @@ def add_to_calendar(summary, start_time, end_time, color_id="1"):
     }
     try:
         service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-        print(f"CALENDAR: {summary} を登録しました")
     except Exception as e:
         print(f"CALENDAR ERROR: {e}")
 
-def create_report_data(user_id, title_prefix):
+async def get_calendar_average(days=14):
+    """過去n日間のカレンダーから1時間ごとの平均活動秒数を算出"""
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    start_dt = (now - datetime.timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # 昨日の終わりまでを取得（今日分は含めない）
+    end_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    try:
+        events_result = service.events().list(
+            calendarId=CALENDAR_ID,
+            timeMin=start_dt.isoformat(),
+            timeMax=end_dt.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        events = events_result.get('items', [])
+
+        hourly_avg = {i: 0 for i in range(24)}
+        if not events:
+            return hourly_avg
+
+        for event in events:
+            start = datetime.datetime.fromisoformat(event['start'].get('dateTime', event['start'].get('date')).replace('Z', '+00:00'))
+            end = datetime.datetime.fromisoformat(event['end'].get('dateTime', event['end'].get('date')).replace('Z', '+00:00'))
+            
+            # 日本時間に変換
+            start = start.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
+            end = end.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
+            
+            # 各時間枠に秒数を割り振る
+            current = start
+            while current < end:
+                next_hour = (current + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+                effective_end = min(end, next_hour)
+                duration = (effective_end - current).total_seconds()
+                hourly_avg[current.hour] += duration
+                current = effective_end
+        
+        # 1日あたりの平均に直す
+        for h in hourly_avg:
+            hourly_avg[h] /= days
+        return hourly_avg
+
+    except Exception as e:
+        print(f"AVG CALC ERROR: {e}")
+        return {i: 0 for i in range(24)}
+
+async def create_report_data(user_id, title_prefix):
     user = bot.get_user(user_id)
     if not user: return None, None
-    
     check_day_reset(user_id)
 
-    # 今日の集計（確定分 + 継続中分）
+    # 今日の集計（メモリ分 + 現在継続中分）
     temp_hourly = user_hourly_data.get(user_id, {i: 0 for i in range(24)}).copy()
     temp_total = user_total_stats.get(user_id, {}).copy()
     
@@ -119,30 +155,20 @@ def create_report_data(user_id, title_prefix):
         st = str(info['status'])
         temp_total[st] = temp_total.get(st, 0) + dur
         if st in ["online", "idle", "dnd"]:
-            h = info['time'].hour
-            temp_hourly[h] = temp_hourly.get(h, 0) + dur
+            temp_hourly[info['time'].hour] = temp_hourly.get(info['time'].hour, 0) + dur
 
-    # グラフ描画
+    # カレンダーから過去14日の平均を取得
+    avg_data = await get_calendar_average(14)
+
     plt.figure(figsize=(10, 5))
     hours_labels = [f"{i}h" for i in range(24)]
     today_mins = [temp_hourly.get(i, 0)/60 for i in range(24)]
+    avg_mins = [avg_data.get(i, 0)/60 for i in range(24)]
     
-    # 今日の棒グラフ
     plt.bar(hours_labels, today_mins, color='#7289da', label='Today', alpha=0.8)
-    
-    # 14日平均の折れ線グラフ
-    if user_id in user_history and len(user_history[user_id]) > 0:
-        avg_mins = []
-        for i in range(24):
-            # 過去の同時刻の秒数を合計して日数で割る
-            hist_sum = sum(day.get(i, 0) for day in user_history[user_id])
-            avg_mins.append((hist_sum / len(user_history[user_id])) / 60)
-        plt.plot(hours_labels, avg_mins, color='#faa61a', marker='o', label='14-day Average', linewidth=2)
-    else:
-        # 履歴がない場合は0で表示（これで「平均値が出ない」状態を回避）
-        plt.plot(hours_labels, [0]*24, color='#faa61a', linestyle=':', label='Average (Collecting data...)')
+    plt.plot(hours_labels, avg_mins, color='#faa61a', marker='o', label='14-day Avg (from Calendar)', linewidth=2)
 
-    plt.title(f"Activity: {user.display_name}")
+    plt.title(f"Activity Analysis - {user.display_name}")
     plt.ylabel("Minutes")
     plt.legend()
     plt.grid(axis='y', linestyle='--', alpha=0.5)
@@ -163,7 +189,7 @@ def create_report_data(user_id, title_prefix):
 
 @bot.event
 async def on_ready():
-    print(f"SYSTEM: Logged in as {bot.user.name}")
+    print(f"Logged in as {bot.user.name}")
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     for guild in bot.guilds:
         for member in guild.members:
@@ -176,7 +202,6 @@ async def on_presence_update(before, after):
     if after.bot or before.status == after.status: return
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     uid = after.id
-    
     check_day_reset(uid)
     
     if uid in user_status_start:
@@ -184,15 +209,12 @@ async def on_presence_update(before, after):
         dur = (now - prev['time']).total_seconds()
         st_str = str(prev['status'])
         
-        # 統計保存
         if uid not in user_total_stats: user_total_stats[uid] = {}
         user_total_stats[uid][st_str] = user_total_stats[uid].get(st_str, 0) + dur
         
         if st_str in ["online", "idle", "dnd"]:
             if uid not in user_hourly_data: user_hourly_data[uid] = {i: 0 for i in range(24)}
             user_hourly_data[uid][prev['time'].hour] = user_hourly_data[uid].get(prev['time'].hour, 0) + dur
-
-            # カレンダー登録（1分以上）
             if dur >= 60:
                 status_map = {"online": ("オンライン", "10"), "idle": ("退席中", "5"), "dnd": ("取り込み中", "11")}
                 if st_str in status_map:
@@ -201,11 +223,11 @@ async def on_presence_update(before, after):
 
     user_status_start[uid] = {'status': after.status, 'time': now}
 
-@bot.tree.command(name="report", description="今日の活動レポートを表示")
+@bot.tree.command(name="report", description="活動レポートを表示")
 async def report(interaction: discord.Interaction):
     try: await interaction.response.defer()
     except: return
-    embed, file = create_report_data(interaction.user.id, "📊 活動状況")
+    embed, file = await create_report_data(interaction.user.id, "📊 活動レポート")
     if embed: await interaction.followup.send(embed=embed, file=file)
 
 @bot.tree.command(name="status", description="ステータス詳細")
