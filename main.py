@@ -12,7 +12,7 @@ import gspread
 from flask import Flask
 from threading import Thread
 
-# --- Flask (Render用) ---
+# --- Flask (Renderの起動維持用) ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is running!"
@@ -25,7 +25,7 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- 設定 ---
+# --- 設定 (環境変数) ---
 TOKEN = os.getenv('DISCORD_TOKEN')
 CALENDAR_ID = os.getenv('CALENDAR_ID')
 SPREADSHEET_KEY = os.getenv('SPREADSHEET_KEY')
@@ -42,7 +42,7 @@ except:
 
 class MyBot(commands.Bot):
     def __init__(self):
-        # 複数人を監視するために全権限（Intents.all）を必須化
+        # 全員を監視するためにIntents.allを適用
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents)
 
@@ -64,24 +64,8 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# --- データ管理 (ユーザーごとの個別辞書) ---
+# --- データ管理 (ユーザーIDごとの辞書) ---
 user_status_start = {}
-
-def save_user_config(user_id, channel_id, name):
-    try:
-        cell = sheet.find(str(user_id))
-        if cell:
-            sheet.update_cell(cell.row, 2, str(channel_id))
-            sheet.update_cell(cell.row, 3, name)
-        else:
-            sheet.append_row([str(user_id), str(channel_id), name])
-    except: pass
-
-def get_user_configs():
-    try:
-        records = sheet.get_all_records()
-        return {int(r['user_id']): int(r['channel_id']) for r in records}
-    except: return {}
 
 def format_time(seconds):
     h, m = divmod(int(seconds // 60), 60)
@@ -89,7 +73,7 @@ def format_time(seconds):
 
 def add_to_calendar(summary, start_time, end_time, color_id="1"):
     event = {
-        'summary': summary,
+        'summary': summary, # ここに "[ユーザー名] ステータス" が入ります
         'start': {'dateTime': start_time.isoformat(), 'timeZone': 'Asia/Tokyo'},
         'end': {'dateTime': end_time.isoformat(), 'timeZone': 'Asia/Tokyo'},
         'colorId': color_id,
@@ -100,17 +84,22 @@ def add_to_calendar(summary, start_time, end_time, color_id="1"):
     except Exception as e:
         print(f"CALENDAR ERROR: {e}")
 
-async def get_activity_data_from_calendar(start_dt, end_dt):
+async def get_activity_data_from_calendar(start_dt, end_dt, target_name=None):
     try:
         events_result = service.events().list(calendarId=CALENDAR_ID, timeMin=start_dt.isoformat(), timeMax=end_dt.isoformat(), singleEvents=True, orderBy='startTime').execute()
         events = events_result.get('items', [])
         hourly_data = {i: 0 for i in range(24)}
         status_totals = {"オンライン": 0, "退席中": 0, "取り込み中": 0}
         active_days = set()
+        
         for event in events:
             summary = event.get('summary', '')
+            # 自分の名前が含まれているイベントのみを抽出
+            if target_name and f"[{target_name}]" not in summary: continue
+            
             found_status = next((k for k in status_totals.keys() if k in summary), None)
             if not found_status: continue
+            
             s = datetime.datetime.fromisoformat(event['start'].get('dateTime').replace('Z', '+00:00')).astimezone(datetime.timezone(datetime.timedelta(hours=9)))
             e = datetime.datetime.fromisoformat(event['end'].get('dateTime').replace('Z', '+00:00')).astimezone(datetime.timezone(datetime.timedelta(hours=9)))
             curr, limit = max(s, start_dt), min(e, end_dt)
@@ -130,9 +119,10 @@ async def create_report_data(user_id, title_prefix):
     if not user: return None, None
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now)
     
-    # リアルタイム分を合算
+    # [名前] でフィルタリングして取得
+    today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now, user.display_name)
+    
     if user_id in user_status_start:
         info = user_status_start[user_id]
         st_map = {"online": "オンライン", "idle": "退席中", "dnd": "取り込み中"}
@@ -149,12 +139,12 @@ async def create_report_data(user_id, title_prefix):
                     it = min(now, next_h)
 
     hist_start = today_start - datetime.timedelta(days=14)
-    hist_hourly, _, active_days_count = await get_activity_data_from_calendar(hist_start, today_start)
+    hist_hourly, _, active_days_count = await get_activity_data_from_calendar(hist_start, today_start, user.display_name)
     divisor = max(active_days_count, 1)
     avg_hourly = {h: sec / divisor for h, sec in hist_hourly.items()}
     avg_total_day = sum(avg_hourly.values())
 
-    # --- グラフデザイン (元データを完全踏襲) ---
+    # --- デザイン維持 ---
     plt.figure(figsize=(10, 5))
     plt.style.use('dark_background')
     plt.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='Today', alpha=0.7)
@@ -201,44 +191,58 @@ async def on_presence_update(before, after):
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     uid = after.id
 
-    configs = get_user_configs()
+    try:
+        records = sheet.get_all_records()
+        configs = {int(r['user_id']): int(r['channel_id']) for r in records}
+    except: return
+
     if uid in configs:
         if uid in user_status_start:
             prev = user_status_start[uid]
             dur = (now - prev['time']).total_seconds()
             if prev['status'] in ["online", "idle", "dnd"] and dur >= 60:
                 st_map = {"online": ("オンライン", "10"), "idle": ("退席中", "5"), "dnd": ("取り込み中", "11")}
-                summary, cid = st_map[prev['status']]
-                add_to_calendar(f"{summary} [{after.display_name}]", prev['time'], now, cid)
+                st_name, cid = st_map.get(prev['status'], ("不明", "1"))
+                
+                # ★タイトルを "[名前] ステータス" に統一
+                event_title = f"[{after.display_name}] {st_name}"
+                add_to_calendar(event_title, prev['time'], now, cid)
+                
                 channel = bot.get_channel(configs[uid])
-                if channel: await channel.send(f"🔔 **{after.display_name}** が **{summary}** になりました。")
+                if channel: await channel.send(f"🔔 **{after.display_name}** が **{st_name}** になりました。")
     
     user_status_start[uid] = {'status': str(after.status), 'time': now}
 
-@bot.tree.command(name="register", description="通知先を登録します")
+@bot.tree.command(name="register", description="人と言語チャンネルを登録します")
 async def register(interaction: discord.Interaction, user: discord.Member, channel: discord.TextChannel):
-    save_user_config(user.id, channel.id, user.display_name)
-    await interaction.response.send_message(f"✅ {user.display_name} を登録しました。", ephemeral=True)
+    try:
+        cell = sheet.find(str(user.id))
+        if cell:
+            sheet.update_cell(cell.row, 2, str(channel.id))
+            sheet.update_cell(cell.row, 3, user.display_name)
+        else:
+            sheet.append_row([str(user.id), str(channel.id), user.display_name])
+        await interaction.response.send_message(f"✅ {user.display_name} を登録しました。", ephemeral=True)
+    except:
+        await interaction.response.send_message("❌ 登録失敗", ephemeral=True)
 
 @bot.tree.command(name="report", description="活動レポートを表示します")
-@app_commands.describe(member="対象のユーザー")
 async def report(interaction: discord.Interaction, member: discord.Member = None):
-    await interaction.response.defer()
+    await interaction.response.defer(thinking=True)
     target = member or interaction.user
     embed, file = await create_report_data(target.id, f"📑 {target.display_name} の活動状況レポート")
     if embed: await interaction.followup.send(embed=embed, file=file)
     else: await interaction.followup.send("❌ データがありません。")
 
 @bot.tree.command(name="status", description="ステータス詳細を表示します")
-@app_commands.describe(member="対象のユーザー")
 async def status(interaction: discord.Interaction, member: discord.Member = None):
-    await interaction.response.defer()
+    await interaction.response.defer(thinking=True)
     target = member or interaction.user
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     info = user_status_start.get(target.id, {'status': str(target.status), 'time': now})
     elapsed = now - info['time']
     st_map = {"online": "🟢 オンライン", "idle": "🌙 退席中", "dnd": "⛔ 取り込み中", "offline": "⚪ オフライン"}
-    embed = discord.Embed(title=f"👤 {target.display_name} の状態", color=0x2ecc71 if info['status'] == "online" else 0x95a5a6, timestamp=now)
+    embed = discord.Embed(title=f"👤 {target.display_name} の詳細", color=0x2ecc71 if info['status'] == "online" else 0x95a5a6, timestamp=now)
     embed.add_field(name="現在", value=f"**{st_map.get(info['status'], '不明')}**")
     embed.add_field(name="継続時間", value=format_time(elapsed.total_seconds()))
     await interaction.followup.send(embed=embed)
