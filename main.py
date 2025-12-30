@@ -25,25 +25,28 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- 日本語フォント設定 (Render権限エラー対策済み) ---
+# --- 日本語フォント設定 ---
+FONT_PATH = 'font.ttf' # プロジェクト内に置いたフォントファイル名
+
 def setup_font_background():
     try:
-        # Renderでは apt-get は使えないため、標準フォントで代用
-        print("⚠️ Font setup: Using system default to avoid permission errors.")
-        plt.rcParams['font.family'] = 'sans-serif'
-        plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
+        if os.path.exists(FONT_PATH):
+            # フォントをmatplotlibに追加
+            fm.fontManager.addfont(FONT_PATH)
+            prop = fm.FontProperties(fname=FONT_PATH)
+            plt.rcParams['font.family'] = prop.get_name()
+            print(f"✅ 日本語フォントを適用しました: {prop.get_name()}")
+        else:
+            print("⚠️ font.ttf が見つかりません。標準フォントを使用します。")
+            plt.rcParams['font.family'] = 'sans-serif'
     except Exception as e:
-        print(f"Font notice: {e}")
+        print(f"Font setup notice: {e}")
 
 # --- API Settings ---
 TOKEN = os.getenv('DISCORD_TOKEN')
 CALENDAR_ID = os.getenv('CALENDAR_ID')
 SPREADSHEET_KEY = os.getenv('SPREADSHEET_KEY')
-# JSON文字列をパース
-try:
-    service_account_info = json.loads(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON'))
-except Exception as e:
-    print(f"❌ JSON Parse Error: {e}")
+service_account_info = json.loads(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON'))
 
 SCOPES = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/spreadsheets']
 creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
@@ -59,14 +62,14 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- グローバル変数 (メモリ管理) ---
+# --- グローバル変数 ---
 user_status_start = {}  # {user_id: {'status': str, 'time': datetime}}
-user_configs = {}       # {user_id: channel_id} (API節約用キャッシュ)
+user_configs = {}       # {user_id: channel_id}
 
 # --- Utility ---
 def format_time(seconds):
     h, m = divmod(int(seconds // 60), 60)
-    return f"**{h}**h **{m}**m" if h > 0 else f"**{m}**m"
+    return f"**{h}**時間 **{m}**分" if h > 0 else f"**{m}**分"
 
 def add_to_calendar(summary, start_time, end_time, color_id="1"):
     event = {
@@ -77,23 +80,21 @@ def add_to_calendar(summary, start_time, end_time, color_id="1"):
     }
     try:
         calendar_service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-        print(f"✅ Calendar Record: {summary}")
+        print(f"✅ カレンダー記録完了: {summary}")
     except Exception:
-        print(f"❌ Calendar Error: {traceback.format_exc()}")
+        print(f"❌ カレンダーエラー: {traceback.format_exc()}")
 
 async def load_configs_from_sheets():
-    """スプレッドシートから設定をキャッシュに読み込む"""
     try:
         sheet = gc.open_by_key(SPREADSHEET_KEY).sheet1
         records = sheet.get_all_records()
         global user_configs
         user_configs = {int(r['user_id']): int(r['channel_id']) for r in records}
-        print(f"✅ Configs loaded: {len(user_configs)} registered users.")
+        print(f"✅ 設定ロード完了: {len(user_configs)} 名のユーザーを監視中")
     except Exception as e:
-        print(f"❌ Failed to load configs: {e}")
+        print(f"❌ スプレッドシート読み込み失敗: {e}")
 
 async def get_activity_data_from_calendar(start_dt, end_dt, user_id):
-    """ユーザーIDを含むイベントを抽出して集計"""
     try:
         events_result = calendar_service.events().list(
             calendarId=CALENDAR_ID, timeMin=start_dt.isoformat(), timeMax=end_dt.isoformat(), 
@@ -104,7 +105,6 @@ async def get_activity_data_from_calendar(start_dt, end_dt, user_id):
         hourly_data = {i: 0 for i in range(24)}
         status_totals = {"Online": 0, "Idle": 0, "DND": 0}
         active_days = set()
-        
         target_marker = f"[{user_id}]"
         
         for event in events:
@@ -112,9 +112,9 @@ async def get_activity_data_from_calendar(start_dt, end_dt, user_id):
             if target_marker not in summary: continue
             
             found_status = None
-            if "オンライン" in summary or "Online" in summary: found_status = "Online"
-            elif "退席中" in summary or "Idle" in summary: found_status = "Idle"
-            elif "取り込み中" in summary or "DND" in summary: found_status = "DND"
+            if "オンライン" in summary: found_status = "Online"
+            elif "退席中" in summary: found_status = "Idle"
+            elif "取り込み中" in summary: found_status = "DND"
             
             if not found_status: continue
             
@@ -132,7 +132,6 @@ async def get_activity_data_from_calendar(start_dt, end_dt, user_id):
                     next_h = (it + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
                     hourly_data[it.hour] += (min(limit, next_h) - it).total_seconds()
                     it = min(limit, next_h)
-                    
         return hourly_data, status_totals, len(active_days)
     except:
         return {i: 0 for i in range(24)}, {"Online": 0, "Idle": 0, "DND": 0}, 0
@@ -143,7 +142,7 @@ async def create_report_data(user_id, title_prefix, display_name):
     
     today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now, user_id)
     
-    # 現在のセッションも計算に含める
+    # 現在のセッションも加算
     if user_id in user_status_start:
         info = user_status_start[user_id]
         st_map = {"online": "Online", "idle": "Idle", "dnd": "DND"}
@@ -165,12 +164,15 @@ async def create_report_data(user_id, title_prefix, display_name):
     avg_hourly = {h: sec / divisor for h, sec in hist_hourly.items()}
     avg_total_day = sum(avg_hourly.values())
 
+    # グラフ描画
     plt.figure(figsize=(10, 5))
     plt.style.use('dark_background')
-    plt.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='Today', alpha=0.7)
+    plt.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='今日', alpha=0.7)
     plt.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label=f'{active_days_count}日間平均', linewidth=2)
-    plt.title(f"Activity: {display_name}", color='white')
-    plt.xticks(range(24), [f"{i}h" for i in range(24)])
+    plt.title(f"活動分析: {display_name}", color='white')
+    plt.xlabel("時間帯", color='white')
+    plt.ylabel("分", color='white')
+    plt.xticks(range(24), [f"{i}時" for i in range(24)])
     plt.legend()
     
     buf = io.BytesIO()
@@ -197,8 +199,7 @@ async def on_ready():
     print(f"--- [STARTUP] ---")
     await load_configs_from_sheets()
     await bot.tree.sync()
-    # 起動時のギルド走査を最小限にして429エラーを回避
-    print(f"✅ Bot is online in {len(bot.guilds)} servers.")
+    print(f"✅ 起動完了: {len(bot.guilds)} サーバーで動作中")
 
 @bot.event
 async def on_presence_update(before, after):
@@ -211,23 +212,21 @@ async def on_presence_update(before, after):
 
     if prev:
         dur = (now - prev['time']).total_seconds()
-        # 1分未満の微小な変化はカレンダーに送らない(API制限対策)
+        # 1分以上の滞在のみ記録
         if prev['status'] in ["online", "idle", "dnd"] and dur >= 60:
             st_map = {"online": ("オンライン", "10"), "idle": ("退席中", "5"), "dnd": ("取り込み中", "11")}
             st_name, cid = st_map.get(prev['status'], ("不明", "1"))
             
-            # 要望のタイトル形式: [user id]ステータス名/開始時刻
+            # [user id]ステータス名/開始時刻
             start_str = prev['time'].strftime('%H:%M:%S')
             event_title = f"[{after.id}] {st_name} / {start_str}"
             
-            # 非同期でカレンダー追加を実行
             add_to_calendar(event_title, prev['time'], now, cid)
             
-            # 通知
             channel_id = user_configs.get(after.id)
             channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             if channel:
-                try: await channel.send(f"🔔 **{after.display_name}** は **{after.status}** になりました。")
+                try: await channel.send(f"🔔 **{after.display_name}** は **{st_name}** になりました。")
                 except: pass
 
 # --- Commands ---
@@ -266,7 +265,8 @@ async def register(interaction: discord.Interaction, user: discord.Member, chann
     except Exception as e:
         await interaction.followup.send(f"❌ 登録に失敗しました: {e}")
 
-# --- 実行開始 ---
-Thread(target=run_flask).start()
-Thread(target=setup_font_background).start()
-bot.run(TOKEN)
+# --- 実行 ---
+if __name__ == "__main__":
+    Thread(target=run_flask).start()
+    setup_font_background() # グラフ用フォント設定
+    bot.run(TOKEN)
