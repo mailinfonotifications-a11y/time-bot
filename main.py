@@ -23,21 +23,23 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- 日本語フォント設定 (太字対応) ---
+# --- 日本語フォント設定 (NotoSansJP-Blackを強制) ---
 FONT_PATH = 'font.ttf' 
 def setup_font_background():
     try:
         if os.path.exists(FONT_PATH):
-            fm.fontManager.addfont(FONT_PATH)
-            prop = fm.FontProperties(fname=FONT_PATH)
-            plt.rcParams['font.family'] = prop.get_name()
-            print(f"✅ フォント適用: {prop.get_name()}")
+            # Blackウェイトを極太として登録
+            fe = fm.FontEntry(fname=FONT_PATH, name='NotoSansJP-Black')
+            fm.fontManager.ttflist.insert(0, fe)
+            plt.rcParams['font.family'] = 'NotoSansJP-Black'
+            plt.rcParams['font.weight'] = 'black'
+            print(f"✅ 極太フォント(Black)をグラフに適用しました")
         else:
             plt.rcParams['font.family'] = 'sans-serif'
     except Exception as e:
         print(f"❌ フォント設定エラー: {e}")
 
-# --- API設定 ---
+# --- API連携設定 ---
 TOKEN = os.getenv('DISCORD_TOKEN')
 CALENDAR_ID = os.getenv('CALENDAR_ID')
 SPREADSHEET_KEY = os.getenv('SPREADSHEET_KEY')
@@ -48,15 +50,15 @@ creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPE
 calendar_service = build('calendar', 'v3', credentials=creds)
 gc = gspread.authorize(creds)
 
-# --- ボット初期化 ---
+# --- ボット初期設定 ---
 intents = discord.Intents.default()
 intents.presences = True
 intents.members = True
 intents.guilds = True
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# 状態管理・通知管理用
 user_status_start = {}  
 user_configs = {}       
 last_notifications = {} 
@@ -78,7 +80,7 @@ def add_to_calendar(summary, start_time, end_time, color_id="1"):
         print(f"❌ カレンダー記録失敗: {traceback.format_exc()}")
 
 async def load_configs_from_sheets():
-    """再デプロイ後に設定を自動復元する"""
+    """再起動後も設定を復元するための読み込み処理"""
     try:
         sheet = gc.open_by_key(SPREADSHEET_KEY).sheet1
         records = sheet.get_all_records()
@@ -89,9 +91,9 @@ async def load_configs_from_sheets():
             if u_id and g_id and c_id:
                 new_configs[f"{u_id}-{g_id}"] = int(c_id)
         user_configs = new_configs
-        print(f"✅ 設定を復元完了: {len(user_configs)}件")
+        print(f"✅ スプレッドシートから {len(user_configs)} 件の設定を復元")
     except Exception as e:
-        print(f"❌ シート読み込み失敗: {e}")
+        print(f"❌ シートロード失敗: {e}")
 
 async def get_activity_data_from_calendar(start_dt, end_dt, user_id):
     try:
@@ -129,7 +131,7 @@ async def create_report_data(user_id, title_prefix, display_name):
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now, user_id)
     
-    # 現在のセッションもグラフに反映
+    # 現在のセッションもグラフに即時反映
     if user_id in user_status_start:
         info = user_status_start[user_id]
         st_eng = {"online": "Online", "idle": "Idle", "dnd": "DND"}.get(info['status'])
@@ -143,27 +145,27 @@ async def create_report_data(user_id, title_prefix, display_name):
                     today_hourly[it.hour] += (min(now, next_h) - it).total_seconds()
                     it = min(now, next_h)
 
-    # 過去2週間の平均を取得
+    # 過去2週間の平均と比較
     hist_start = today_start - datetime.timedelta(days=14)
     hist_hourly, _, active_days_count = await get_activity_data_from_calendar(hist_start, today_start, user_id)
     divisor = max(active_days_count, 1)
     avg_hourly = {h: sec / divisor for h, sec in hist_hourly.items()}
     avg_total_day = sum(avg_hourly.values())
 
-    # グラフ描画（視認性重視）
+    # グラフ描画（視認性最強設定）
     plt.style.use('dark_background')
     fig = plt.figure(figsize=(10, 6), facecolor='#000000')
     ax = fig.add_subplot(111, facecolor='#000000')
     
-    plt.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='今日', alpha=0.8)
-    plt.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label=f'{active_days_count}日間平均', linewidth=3, markersize=8)
+    plt.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='今日', alpha=0.85)
+    plt.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label=f'{active_days_count}日間平均', linewidth=4, markersize=8)
     
-    plt.title(f"活動分析: {display_name}", color='white', pad=25, fontsize=20, fontweight='bold')
-    plt.xlabel("時間帯 (h)", color='white', fontsize=14, fontweight='bold')
-    plt.ylabel("滞在時間 (min)", color='white', fontsize=14, fontweight='bold', rotation=0, labelpad=30)
+    plt.title(f"活動分析: {display_name}", color='white', pad=25, fontsize=22, fontweight='black')
+    plt.xlabel("時間帯 (h)", color='white', fontsize=15, fontweight='black')
+    plt.ylabel("滞在時間 (min)", color='white', fontsize=15, fontweight='black', rotation=0, labelpad=35)
     
-    plt.xticks(range(24), [f"{i}" for i in range(24)], color='white', fontsize=12, fontweight='bold')
-    plt.yticks(color='white', fontsize=12, fontweight='bold')
+    plt.xticks(range(24), [f"{i}" for i in range(24)], color='white', fontsize=12, fontweight='black')
+    plt.yticks(color='white', fontsize=12, fontweight='black')
     plt.grid(axis='y', color='#444444', linestyle='--', alpha=0.7)
     plt.legend(fontsize=12, loc='upper left')
     
@@ -188,53 +190,53 @@ async def create_report_data(user_id, title_prefix, display_name):
 async def on_ready():
     await load_configs_from_sheets()
     await bot.tree.sync()
-    print(f"✅ Bot Online - 全機能稼働中")
+    print(f"✅ Bot Online - すべての機能が有効です")
 
 @bot.event
 async def on_presence_update(before, after):
-    # 本当にステータスが変わった時のみ（重複通知防止）
+    # ステータスに変更がない場合はスキップ（重複通知防止）
     if after.bot or before.status == after.status: return
     
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     
-    # 1. カレンダー記録（前の状態を保存）
+    # 状態の保存とカレンダー記録
     prev = user_status_start.get(after.id)
     user_status_start[after.id] = {'status': str(after.status), 'time': now}
     
     if prev:
         dur = (now - prev['time']).total_seconds()
+        # 1分以上の滞在のみカレンダーに記録
         if prev['status'] in ["online", "idle", "dnd"] and dur >= 60:
             st_map_cal = {"online": ("オンライン", "10"), "idle": ("退席中", "5"), "dnd": ("取り込み中", "11")}
             st_name_prev, cid = st_map_cal.get(prev['status'], ("不明", "1"))
             add_to_calendar(f"[{after.id}] {st_name_prev}", prev['time'], now, cid)
 
-    # 2. 複数サーバー個別通知（オフライン対応）
+    # ステータス変更通知（即時性強化版）
     st_display = {"online": "🟢 オンライン", "idle": "🌙 退席中", "dnd": "⛔ 取り込み中", "offline": "⚪ オフライン"}
     current_status_text = st_display.get(str(after.status), "⚪ オフライン")
     
-    sent_channels = set() 
     for guild in bot.guilds:
         member = guild.get_member(after.id)
         if not member: continue
         
         config_key = f"{after.id}-{guild.id}"
         target_channel_id = user_configs.get(config_key)
-        if not target_channel_id or target_channel_id in sent_channels: continue
+        if not target_channel_id: continue
         
-        # 通知ロック（短時間の連投防止）
+        # 前回通知から3秒経過していれば即通知
         lock_key = f"notify-{config_key}"
         last = last_notifications.get(lock_key)
-        if last and (now - last).total_seconds() < 3: continue
-        last_notifications[lock_key] = now
         
-        channel = bot.get_channel(target_channel_id)
-        if channel:
-            await channel.send(f"🔔 **{after.display_name}** は **{current_status_text}** になりました。")
-            sent_channels.add(target_channel_id)
+        if last is None or (now - last).total_seconds() >= 3:
+            last_notifications[lock_key] = now
+            channel = bot.get_channel(target_channel_id)
+            if channel:
+                await channel.send(f"🔔 **{after.display_name}** は **{current_status_text}** になりました。")
 
-@bot.tree.command(name="register", description="通知先を登録")
+@bot.tree.command(name="register", description="通知先を登録・更新")
 async def register(interaction: discord.Interaction, user: discord.Member, channel: discord.TextChannel):
-    await interaction.response.defer()
+    # タイムアウト回避
+    await interaction.response.defer(ephemeral=True)
     try:
         sheet = gc.open_by_key(SPREADSHEET_KEY).sheet1
         records = sheet.get_all_records()
@@ -245,9 +247,11 @@ async def register(interaction: discord.Interaction, user: discord.Member, chann
                 break
         if row_idx: sheet.update_cell(row_idx, 3, str(channel.id))
         else: sheet.append_row([str(user.id), str(interaction.guild_id), str(channel.id), user.display_name])
+        
         user_configs[f"{user.id}-{interaction.guild_id}"] = channel.id
         await interaction.followup.send(f"✅ {user.mention} の通知先を {channel.mention} に設定しました。")
-    except Exception as e: await interaction.followup.send(f"❌ エラー: {e}")
+    except Exception as e:
+        await interaction.followup.send(f"❌ エラー: {e}")
 
 @bot.tree.command(name="report", description="活動レポートを表示")
 async def report(interaction: discord.Interaction, member: discord.Member = None):
@@ -257,20 +261,24 @@ async def report(interaction: discord.Interaction, member: discord.Member = None
         target = member or interaction.user
         embed, file = await create_report_data(target.id, f"📑 活動レポート: {target.display_name}", target.display_name)
         await interaction.followup.send(embed=embed, file=file)
-    except Exception as e:
-        print(f"❌ Report Error: {e}")
-        await interaction.followup.send("レポート作成エラー。")
+    except Exception:
+        await interaction.followup.send("レポート作成エラーが発生しました。")
 
-@bot.tree.command(name="status", description="ステータス確認")
+@bot.tree.command(name="status", description="現在のステータスを詳細表示")
 async def status(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     info = user_status_start.get(target.id, {'status': str(target.status), 'time': now})
-    st_configs = {"online": {"name": "🟢 オンライン", "color": 0x23a55a}, "idle": {"name": "🌙 退席中", "color": 0xf0b232}, "dnd": {"name": "⛔ 取り込み中", "color": 0xf23f43}, "offline": {"name": "⚪ オフライン", "color": 0x80848e}}
+    st_configs = {
+        "online": {"name": "🟢 オンライン", "color": 0x23a55a},
+        "idle": {"name": "🌙 退席中", "color": 0xf0b232},
+        "dnd": {"name": "⛔ 取り込み中", "color": 0xf23f43},
+        "offline": {"name": "⚪ オフライン", "color": 0x80848e}
+    }
     conf = st_configs.get(info['status'], {"name": info['status'], "color": 0x5865F2})
     embed = discord.Embed(title=f"👤 {target.display_name}", color=conf["color"])
     embed.add_field(name="状態", value=conf["name"])
-    embed.add_field(name="継続時間", value=format_time((now - info['time']).total_seconds()))
+    embed.add_field(name="この状態での経過時間", value=format_time((now - info['time']).total_seconds()))
     await interaction.response.send_message(embed=embed)
 
 if __name__ == "__main__":
