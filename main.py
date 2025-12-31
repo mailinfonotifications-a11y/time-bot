@@ -41,7 +41,7 @@ intents.guilds = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 状態管理・通知管理用
+# 状態管理
 user_status_start = {}  
 user_configs = {}       
 last_notifications = {} 
@@ -63,7 +63,6 @@ def add_to_calendar(summary, start_time, end_time, color_id="1"):
         print(f"❌ カレンダー記録失敗: {traceback.format_exc()}")
 
 async def load_configs_from_sheets():
-    """再起動後も設定を復元するための読み込み処理"""
     try:
         sheet = gc.open_by_key(SPREADSHEET_KEY).sheet1
         records = sheet.get_all_records()
@@ -114,7 +113,6 @@ async def create_report_data(user, title_prefix):
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now, user.id)
     
-    # 現在のセッションも反映
     if user.id in user_status_start:
         info = user_status_start[user.id]
         st_eng = {"online": "Online", "idle": "Idle", "dnd": "DND"}.get(info['status'])
@@ -134,7 +132,7 @@ async def create_report_data(user, title_prefix):
     avg_hourly = {h: sec / divisor for h, sec in hist_hourly.items()}
     avg_total_day = sum(avg_hourly.values())
 
-    # --- グラフ描画（画像内は完全英語） ---
+    # --- グラフ描画（画像内は英語） ---
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='#0b0e14')
     ax.set_facecolor('#0b0e14')
@@ -158,7 +156,6 @@ async def create_report_data(user, title_prefix):
     buf.seek(0)
     plt.close()
     
-    # --- レポート本文（ここは日本語） ---
     total_today = sum(today_status.values())
     eff_val = (total_today/avg_total_day*100) if avg_total_day > 0 else 0
     file = discord.File(buf, filename="graph.png")
@@ -176,14 +173,13 @@ async def create_report_data(user, title_prefix):
 async def on_ready():
     await load_configs_from_sheets()
     await bot.tree.sync()
-    print(f"✅ Bot Online - All functions active")
+    print(f"✅ Bot Online - Status command added")
 
 @bot.event
 async def on_presence_update(before, after):
     if after.bot or before.status == after.status: return
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     
-    # カレンダー記録
     prev = user_status_start.get(after.id)
     user_status_start[after.id] = {'status': str(after.status), 'time': now}
     
@@ -194,21 +190,16 @@ async def on_presence_update(before, after):
             st_name_prev, cid = st_map_cal.get(prev['status'], ("不明", "1"))
             add_to_calendar(f"[{after.id}] {st_name_prev}", prev['time'], now, cid)
 
-    # 通知送信（ニックネーム & 日本語）
     st_display = {"online": "🟢 オンライン", "idle": "🌙 退席中", "dnd": "⛔ 取り込み中", "offline": "⚪ オフライン"}
     current_status_text = st_display.get(str(after.status), "⚪ オフライン")
     
     for guild in bot.guilds:
-        member = guild.get_member(after.id)
-        if not member: continue
-        
         config_key = f"{after.id}-{guild.id}"
         target_channel_id = user_configs.get(config_key)
         if not target_channel_id: continue
         
         lock_key = f"notify-{config_key}"
         last = last_notifications.get(lock_key)
-        
         if last is None or (now - last).total_seconds() >= 3:
             last_notifications[lock_key] = now
             channel = bot.get_channel(target_channel_id)
@@ -232,6 +223,33 @@ async def register(interaction: discord.Interaction, user: discord.Member, chann
         await interaction.followup.send(f"✅ {user.display_name} の通知先を設定しました。")
     except Exception as e:
         await interaction.followup.send(f"❌ エラー: {e}")
+
+@bot.tree.command(name="status", description="現在のステータスを確認")
+async def status(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    
+    status_str = str(target.status)
+    # ステータスに応じた色と日本語表記
+    color_map = {"online": 0x57F287, "idle": 0xFEE75C, "dnd": 0xED4245, "offline": 0x95A5A6}
+    label_map = {"online": "🟢 オンライン", "idle": "🌙 退席中", "dnd": "⛔ 取り込み中", "offline": "⚪ オフライン"}
+    
+    color = color_map.get(status_str, 0x95A5A6)
+    label = label_map.get(status_str, "⚪ オフライン")
+    
+    embed = discord.Embed(title=f"現在のステータス: {target.display_name}", color=color)
+    embed.add_field(name="Status", value=label, inline=True)
+    
+    if target.id in user_status_start:
+        info = user_status_start[target.id]
+        start_time = info['time']
+        duration = now - start_time
+        embed.add_field(name="開始時刻", value=start_time.strftime("%H:%M:%S"), inline=True)
+        embed.add_field(name="経過時間", value=format_time_jp(duration.total_seconds()), inline=False)
+    else:
+        embed.add_field(name="開始時刻", value="不明（起動前）", inline=True)
+        
+    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="report", description="活動レポートを表示")
 async def report(interaction: discord.Interaction, member: discord.Member = None):
