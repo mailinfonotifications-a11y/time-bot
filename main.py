@@ -34,7 +34,7 @@ def setup_font_background():
             print(f"✅ フォント適用完了: {prop.get_name()}")
         else:
             plt.rcParams['font.family'] = 'sans-serif'
-            print("⚠️ font.ttf が見つからないため、標準フォントを使用します。")
+            print("⚠️ font.ttf が見つからないため標準フォントを使用")
     except Exception as e:
         print(f"❌ フォント設定エラー: {e}")
 
@@ -58,12 +58,10 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- グローバル変数 ---
 user_status_start = {}  
-user_configs = {}       # { "user_id-guild_id": channel_id }
-last_notifications = {} # 重複防止用
+user_configs = {}       
+last_notifications = {} 
 
-# --- Utility ---
 def format_time(seconds):
     h, m = divmod(int(seconds // 60), 60)
     return f"**{h}**時間 **{m}**分" if h > 0 else f"**{m}**分"
@@ -87,17 +85,14 @@ async def load_configs_from_sheets():
         global user_configs
         new_configs = {}
         for r in records:
-            u_id = r.get('user_id')
-            g_id = r.get('guild_id')
-            c_id = r.get('channel_id')
+            u_id, g_id, c_id = r.get('user_id'), r.get('guild_id'), r.get('channel_id')
             if u_id and g_id and c_id:
                 new_configs[f"{u_id}-{g_id}"] = int(c_id)
         user_configs = new_configs
-        print(f"✅ 設定ロード完了: {len(user_configs)} 件")
+        print(f"✅ 設定ロード完了: {len(user_configs)}件")
     except Exception as e:
         print(f"❌ シート読み込み失敗: {e}")
 
-# --- レポート生成ロジック ---
 async def get_activity_data_from_calendar(start_dt, end_dt, user_id):
     try:
         events_result = calendar_service.events().list(
@@ -109,14 +104,12 @@ async def get_activity_data_from_calendar(start_dt, end_dt, user_id):
         status_totals = {"Online": 0, "Idle": 0, "DND": 0}
         active_days = set()
         target_marker = f"[{user_id}]"
-        
         for event in events:
             summary = event.get('summary', '')
             if target_marker not in summary: continue
             found_status = "Online" if "オンライン" in summary else "Idle" if "退席中" in summary else "DND" if "取り込み中" in summary else None
             if not found_status: continue
-            st_str = event['start'].get('dateTime') or event['start'].get('date')
-            en_str = event['end'].get('dateTime') or event['end'].get('date')
+            st_str, en_str = event['start'].get('dateTime'), event['end'].get('dateTime')
             s = datetime.datetime.fromisoformat(st_str.replace('Z', '+00:00')).astimezone(datetime.timezone(datetime.timedelta(hours=9)))
             e = datetime.datetime.fromisoformat(en_str.replace('Z', '+00:00')).astimezone(datetime.timezone(datetime.timedelta(hours=9)))
             curr, limit = max(s, start_dt), min(e, end_dt)
@@ -156,19 +149,20 @@ async def create_report_data(user_id, title_prefix, display_name):
     avg_total_day = sum(avg_hourly.values())
 
     plt.style.use('dark_background')
-    fig = plt.figure(figsize=(10, 5), facecolor='#000000')
+    fig = plt.figure(figsize=(10, 6), facecolor='#000000')
     ax = fig.add_subplot(111, facecolor='#000000')
     
-    plt.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='今日', alpha=0.8)
-    plt.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label=f'{active_days_count}日間平均', linewidth=2)
+    plt.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='今日', alpha=0.9)
+    plt.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label=f'{active_days_count}日間平均', linewidth=3, markersize=8)
     
-    plt.title(f"活動分析: {display_name}", color='white', pad=20)
-    plt.xlabel("時間帯", color='white')
-    plt.ylabel("滞在分", color='white')
-    plt.xticks(range(24), [f"{i}" for i in range(24)], color='white')
-    plt.yticks(color='white')
-    plt.grid(axis='y', color='#333333', linestyle='--')
-    plt.legend()
+    plt.title(f"活動分析: {display_name}", color='white', pad=25, fontsize=20, fontweight='bold')
+    plt.xlabel("時間帯 (h)", color='white', fontsize=14, fontweight='bold')
+    plt.ylabel("滞在時間 (min)", color='white', fontsize=14, fontweight='bold', rotation=90, labelpad=15) # 縦向き固定
+    
+    plt.xticks(range(24), [f"{i}" for i in range(24)], color='white', fontsize=12, fontweight='bold')
+    plt.yticks(color='white', fontsize=12, fontweight='bold')
+    plt.grid(axis='y', color='#444444', linestyle='--', alpha=0.7)
+    plt.legend(fontsize=12, loc='upper left')
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png', facecolor='#000000', bbox_inches='tight')
@@ -187,19 +181,16 @@ async def create_report_data(user_id, title_prefix, display_name):
     embed.set_image(url="attachment://graph.png")
     return embed, file
 
-# --- Bot Events ---
 @bot.event
 async def on_ready():
     await load_configs_from_sheets()
     await bot.tree.sync()
-    print(f"✅ Bot Online: {len(user_configs)}件の登録を確認")
+    print(f"✅ Bot Online")
 
 @bot.event
 async def on_presence_update(before, after):
     if after.bot or before.status == after.status: return
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
-
-    # 1. カレンダー記録処理
     lock_key_cal = f"cal-{after.id}"
     last_cal = last_notifications.get(lock_key_cal)
     if not (last_cal and (now - last_cal).total_seconds() < 2):
@@ -213,31 +204,25 @@ async def on_presence_update(before, after):
                 st_name_prev, cid = st_map_cal.get(prev['status'], ("不明", "1"))
                 add_to_calendar(f"[{after.id}] {st_name_prev} / {prev['time'].strftime('%H:%M:%S')}", prev['time'], now, cid)
 
-    # 2. 複数サーバー個別通知（同一チャンネル重複防止）
     st_display = {"online": "🟢 オンライン", "idle": "🌙 退席中", "dnd": "⛔ 取り込み中", "offline": "⚪ オフライン"}
     current_status_text = st_display.get(str(after.status), str(after.status))
     sent_channels = set() 
-
     for guild in bot.guilds:
         member = guild.get_member(after.id)
         if not member: continue
-
         config_key = f"{after.id}-{guild.id}"
         target_channel_id = user_configs.get(config_key)
         if not target_channel_id or target_channel_id in sent_channels: continue
-
         lock_key_notify = f"notify-{config_key}"
         last_notify = last_notifications.get(lock_key_notify)
         if last_notify and (now - last_notify).total_seconds() < 3: continue
-        
         last_notifications[lock_key_notify] = now
         channel = bot.get_channel(target_channel_id) or await bot.fetch_channel(target_channel_id)
         if channel:
             await channel.send(f"🔔 **{after.display_name}** は **{current_status_text}** になりました。")
             sent_channels.add(target_channel_id)
 
-# --- Commands ---
-@bot.tree.command(name="register", description="通知先を登録/更新(サーバーごとに設定可能)")
+@bot.tree.command(name="register", description="通知先を登録")
 async def register(interaction: discord.Interaction, user: discord.Member, channel: discord.TextChannel):
     await interaction.response.defer()
     try:
@@ -248,40 +233,34 @@ async def register(interaction: discord.Interaction, user: discord.Member, chann
             if str(r.get('user_id')) == str(user.id) and str(r.get('guild_id')) == str(interaction.guild_id):
                 row_idx = i
                 break
-        
-        if row_idx:
-            sheet.update_cell(row_idx, 3, str(channel.id))
-        else:
-            sheet.append_row([str(user.id), str(interaction.guild_id), str(channel.id), user.display_name])
-        
+        if row_idx: sheet.update_cell(row_idx, 3, str(channel.id))
+        else: sheet.append_row([str(user.id), str(interaction.guild_id), str(channel.id), user.display_name])
         user_configs[f"{user.id}-{interaction.guild_id}"] = channel.id
-        await interaction.followup.send(f"✅ {user.mention} の通知をこのサーバーの {channel.mention} に登録しました！")
-    except Exception as e:
-        await interaction.followup.send(f"❌ 登録エラー: {e}")
+        await interaction.followup.send(f"✅ {user.mention} の通知を {channel.mention} に設定完了")
+    except Exception as e: await interaction.followup.send(f"❌ エラー: {e}")
 
 @bot.tree.command(name="report", description="活動レポートを表示")
 async def report(interaction: discord.Interaction, member: discord.Member = None):
-    await interaction.response.defer(thinking=True)
-    target = member or interaction.user
-    embed, file = await create_report_data(target.id, f"📑 活動レポート: {target.display_name}", target.display_name)
-    await interaction.followup.send(embed=embed, file=file)
+    try: await interaction.response.defer(thinking=True)
+    except: return
+    try:
+        target = member or interaction.user
+        embed, file = await create_report_data(target.id, f"📑 活動レポート: {target.display_name}", target.display_name)
+        await interaction.followup.send(embed=embed, file=file)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        await interaction.followup.send("作成エラー。時間を置いて試してください。")
 
-@bot.tree.command(name="status", description="今のステータスを確認")
+@bot.tree.command(name="status", description="ステータス確認")
 async def status(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     info = user_status_start.get(target.id, {'status': str(target.status), 'time': now})
-    elapsed = now - info['time']
-    st_configs = {
-        "online": {"name": "🟢 オンライン", "color": 0x23a55a},
-        "idle":   {"name": "🌙 退席中",     "color": 0xf0b232},
-        "dnd":    {"name": "⛔ 取り込み中", "color": 0xf23f43},
-        "offline": {"name": "⚪ オフライン", "color": 0x80848e}
-    }
+    st_configs = {"online": {"name": "🟢 オンライン", "color": 0x23a55a}, "idle": {"name": "🌙 退席中", "color": 0xf0b232}, "dnd": {"name": "⛔ 取り込み中", "color": 0xf23f43}}
     conf = st_configs.get(info['status'], {"name": info['status'], "color": 0x5865F2})
-    embed = discord.Embed(title=f"👤 ステータス: {target.display_name}", color=conf["color"])
-    embed.add_field(name="現在の状態", value=conf["name"])
-    embed.add_field(name="継続時間", value=format_time(elapsed.total_seconds()))
+    embed = discord.Embed(title=f"👤 {target.display_name}", color=conf["color"])
+    embed.add_field(name="状態", value=conf["name"])
+    embed.add_field(name="継続", value=format_time((now - info['time']).total_seconds()))
     await interaction.response.send_message(embed=embed)
 
 if __name__ == "__main__":
