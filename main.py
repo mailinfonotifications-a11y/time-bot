@@ -25,19 +25,15 @@ def run_flask():
 
 # --- 日本語フォント設定 ---
 FONT_PATH = 'font.ttf' 
-
 def setup_font_background():
     try:
         if os.path.exists(FONT_PATH):
             fm.fontManager.addfont(FONT_PATH)
             prop = fm.FontProperties(fname=FONT_PATH)
             plt.rcParams['font.family'] = prop.get_name()
-            print(f"✅ 日本語フォントを適用しました: {prop.get_name()}")
         else:
-            print("⚠️ font.ttf が見つかりません。")
             plt.rcParams['font.family'] = 'sans-serif'
-    except Exception as e:
-        print(f"Font setup notice: {e}")
+    except: pass
 
 # --- API Settings ---
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -77,19 +73,20 @@ def add_to_calendar(summary, start_time, end_time, color_id="1"):
     }
     try:
         calendar_service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-        print(f"✅ カレンダー記録完了: {summary}")
     except:
         print(f"❌ カレンダーエラー: {traceback.format_exc()}")
 
+# スプレッドシートから設定をロードする関数
 async def load_configs_from_sheets():
     try:
         sheet = gc.open_by_key(SPREADSHEET_KEY).sheet1
         records = sheet.get_all_records()
         global user_configs
-        user_configs = {int(r['user_id']): int(r['channel_id']) for r in records}
-        print(f"✅ 設定ロード完了: {len(user_configs)} 名を監視中")
+        # A列:user_id, B列:channel_id が見出しになっている前提
+        user_configs = {int(r['user_id']): int(r['channel_id']) for r in records if r['user_id']}
+        print(f"✅ 設定ロード完了: {len(user_configs)} 名の情報を復元しました")
     except Exception as e:
-        print(f"❌ スプレッドシート読み込み失敗: {e}")
+        print(f"❌ シート読み込み失敗: {e}")
 
 async def get_activity_data_from_calendar(start_dt, end_dt, user_id):
     try:
@@ -129,7 +126,6 @@ async def create_report_data(user_id, title_prefix, display_name):
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now, user_id)
     
-    # 現在のセッション加算
     if user_id in user_status_start:
         info = user_status_start[user_id]
         st_eng = {"online": "Online", "idle": "Idle", "dnd": "DND"}.get(info['status'])
@@ -150,8 +146,8 @@ async def create_report_data(user_id, title_prefix, display_name):
     avg_total_day = sum(avg_hourly.values())
 
     # --- グラフ描画（背景を黒に固定） ---
-    fig = plt.figure(figsize=(10, 5), facecolor='#000000') # 外枠背景を黒
-    ax = fig.add_subplot(111, facecolor='#000000')         # グラフエリア背景を黒
+    fig = plt.figure(figsize=(10, 5), facecolor='#000000') 
+    ax = fig.add_subplot(111, facecolor='#000000')         
     plt.style.use('dark_background')
     
     plt.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='今日', alpha=0.8)
@@ -185,26 +181,44 @@ async def create_report_data(user_id, title_prefix, display_name):
 # --- Bot Events ---
 @bot.event
 async def on_ready():
+    # 起動時にシートから監視対象を自動復元
     await load_configs_from_sheets()
+    # プロフィールにコマンド一覧を出すための同期
     await bot.tree.sync()
-    print(f"✅ Bot is online and synced.")
+    print(f"✅ Bot is online. 監視対象: {len(user_configs)}名")
 
 @bot.event
 async def on_presence_update(before, after):
+    # ステータス変化がない場合は無視
     if after.bot or before.status == after.status: return
     if after.id not in user_configs: return
+
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    
+    # 1. カレンダー記録（直前までの状態を保存）
     prev = user_status_start.get(after.id)
     user_status_start[after.id] = {'status': str(after.status), 'time': now}
+
     if prev:
         dur = (now - prev['time']).total_seconds()
         if prev['status'] in ["online", "idle", "dnd"] and dur >= 60:
-            st_map = {"online": ("オンライン", "10"), "idle": ("退席中", "5"), "dnd": ("取り込み中", "11")}
-            st_name, cid = st_map.get(prev['status'], ("不明", "1"))
-            add_to_calendar(f"[{after.id}] {st_name} / {prev['time'].strftime('%H:%M:%S')}", prev['time'], now, cid)
-            ch_id = user_configs.get(after.id)
-            channel = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
-            if channel: await channel.send(f"🔔 **{after.display_name}** は **{st_name}** になりました。")
+            st_map_cal = {"online": ("オンライン", "10"), "idle": ("退席中", "5"), "dnd": ("取り込み中", "11")}
+            st_name_prev, cid = st_map_cal.get(prev['status'], ("不明", "1"))
+            add_to_calendar(f"[{after.id}] {st_name_prev} / {prev['time'].strftime('%H:%M:%S')}", prev['time'], now, cid)
+
+    # 2. 通知処理（「変更後」の最新状態を表示）
+    st_display = {
+        "online": "🟢 オンライン",
+        "idle":   "🌙 退席中",
+        "dnd":    "⛔ 取り込み中",
+        "offline": "⚪ オフライン"
+    }
+    current_status_text = st_display.get(str(after.status), str(after.status))
+    
+    ch_id = user_configs.get(after.id)
+    channel = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+    if channel:
+        await channel.send(f"🔔 **{after.display_name}** は **{current_status_text}** になりました。")
 
 # --- Commands ---
 @bot.tree.command(name="report", description="活動レポートを表示")
@@ -218,9 +232,10 @@ async def report(interaction: discord.Interaction, member: discord.Member = None
 async def status(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    # 現在のメモリから取得、なければ今のステータスを基準にする
     info = user_status_start.get(target.id, {'status': str(target.status), 'time': now})
     elapsed = now - info['time']
-    # ステータスごとの色設定
+    
     st_configs = {
         "online": {"name": "🟢 オンライン", "color": 0x23a55a},
         "idle":   {"name": "🌙 退席中",     "color": 0xf0b232},
@@ -228,6 +243,7 @@ async def status(interaction: discord.Interaction, member: discord.Member = None
         "offline": {"name": "⚪ オフライン", "color": 0x80848e}
     }
     conf = st_configs.get(info['status'], {"name": info['status'], "color": 0x5865F2})
+    
     embed = discord.Embed(title=f"👤 ステータス: {target.display_name}", color=conf["color"])
     embed.add_field(name="現在の状態", value=conf["name"])
     embed.add_field(name="経過時間", value=format_time(elapsed.total_seconds()))
@@ -241,6 +257,7 @@ async def register(interaction: discord.Interaction, user: discord.Member, chann
         cell = sheet.find(str(user.id))
         if cell: sheet.update_cell(cell.row, 2, str(channel.id))
         else: sheet.append_row([str(user.id), str(channel.id), user.display_name])
+        
         user_configs[user.id] = channel.id
         embed = discord.Embed(title="✅ 登録完了", description=f"{user.mention} を {channel.mention} に登録しました。", color=0x00ff00)
         await interaction.followup.send(embed=embed)
