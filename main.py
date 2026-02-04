@@ -208,14 +208,25 @@ async def on_presence_update(before, after):
             except Exception as e: print(f"❌ 記録失敗: {e}")
             
     st_d = {"online": "🟢 オンライン", "idle": "🌙 退席中", "dnd": "⛔ 取り込み中", "offline": "⚪ オフライン"}
+    # main.py 213行目〜219行目付近を書き換え
     for guild in bot.guilds:
         c_id = user_configs.get(f"{after.id}-{guild.id}")
         if not c_id: continue
+        
         lock_key = f"{after.id}-{guild.id}"
-        if lock_key in last_notifications and (now - last_notifications[lock_key]).total_seconds() < 3: continue
+        if lock_key in last_notifications and (now - last_notifications[lock_key]).total_seconds() < 3: 
+            continue
+            
         last_notifications[lock_key] = now
         channel = bot.get_channel(c_id)
-        if channel: await channel.send(f"🔔 **{after.display_name}** は **{st_d.get(str(after.status), '⚪ オフライン')}** になりました。")
+        
+        if channel:
+            try:
+                await channel.send(f"🔔 **{after.display_name}** は **{st_d.get(str(after.status), '⚪ オフライン')}** になりました。")
+            except discord.Forbidden:
+                print(f"⚠️ 権限不足: サーバー '{guild.name}' のチャンネル '{channel.name}' (ID:{c_id}) に送信できませんでした。")
+            except Exception as e:
+                print(f"❌ 通知送信エラー: {e}")
 
 @bot.tree.command(name="register", description="通知先登録")
 async def register(interaction: discord.Interaction, user: discord.Member, channel: discord.TextChannel):
@@ -246,12 +257,19 @@ async def status(interaction: discord.Interaction, member: discord.Member = None
 
 @bot.tree.command(name="report", description="レポート作成")
 async def report(interaction: discord.Interaction, member: discord.Member = None):
-    await interaction.response.defer()
+    # 1. 3秒ルール回避のため、まず最初に呼び出す
+    await interaction.response.defer() 
+    
     target = member or interaction.user
     try:
+        # 2. 重い処理（カレンダー取得・グラフ作成）を実行
         embed, file = await create_report_data(target, f"📑 レポート: {target.display_name}")
+        # 3. deferした後は followup.send を使う
         await interaction.followup.send(embed=embed, file=file)
-    except: await interaction.followup.send("❌ エラーが発生しました。")
+    except Exception as e:
+        print(f"❌ レポート作成エラー: {e}")
+        # エラーが起きてもユーザーに返信する
+        await interaction.followup.send("❌ レポートの作成に失敗しました。カレンダーのデータがあるか確認してください。")
 
 if __name__ == "__main__":
     Thread(target=run_flask).start()
