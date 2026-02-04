@@ -186,8 +186,13 @@ async def on_ready():
 
 @bot.event
 async def on_presence_update(before, after):
-    if after.bot or before.status == after.status: return
+    # ボット自身や、ステータスに変化がない場合は無視
+    if after.bot or before.status == after.status:
+        return
+
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    
+    # --- カレンダー記録ロジック (現状維持) ---
     prev = user_status_start.get(after.id)
     user_status_start[after.id] = {'status': str(after.status), 'time': now}
     
@@ -204,15 +209,24 @@ async def on_presence_update(before, after):
                     'colorId': cid
                 }
                 calendar_service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-                print(f"✅ カレンダー記録: {after.display_name}")
-            except Exception as e: print(f"❌ 記録失敗: {e}")
-            
-    st_d = {"online": "🟢 オンライン", "idle": "🌙 退席中", "dnd": "⛔ 取り込み中", "offline": "⚪ オフライン"}
-    # main.py 213行目〜219行目付近を書き換え
+            except Exception as e: 
+                print(f"❌ カレンダー記録失敗: {e}")
+
+    # --- ステータス通知送信ロジック (改善版) ---
+    st_d = {
+        "online": "🟢 **オンライン**", 
+        "idle": "🌙 **退席中**", 
+        "dnd": "⛔ **取り込み中**", 
+        "offline": "⚪ **オフライン**"
+    }
+
     for guild in bot.guilds:
+        # スプレッドシートから読み込んだ設定があるか確認
         c_id = user_configs.get(f"{after.id}-{guild.id}")
-        if not c_id: continue
+        if not c_id: 
+            continue
         
+        # 短時間の連投防止 (3秒以内の連続変化は無視)
         lock_key = f"{after.id}-{guild.id}"
         if lock_key in last_notifications and (now - last_notifications[lock_key]).total_seconds() < 3: 
             continue
@@ -222,12 +236,15 @@ async def on_presence_update(before, after):
         
         if channel:
             try:
-                await channel.send(f"🔔 **{after.display_name}** は **{st_d.get(str(after.status), '⚪ オフライン')}** になりました。")
+                # 前回のステータスも含めて送ると分かりやすい
+                old_st = st_d.get(str(before.status), "⚪ オフライン")
+                new_st = st_d.get(str(after.status), "⚪ オフライン")
+                await channel.send(f"🔔 **{after.display_name}**： {old_st} ➡ {new_st}")
             except discord.Forbidden:
-                print(f"⚠️ 権限不足: サーバー '{guild.name}' のチャンネル '{channel.name}' (ID:{c_id}) に送信できませんでした。")
+                print(f"⚠️ 権限不足: {guild.name} の {channel.name} でメッセージが送れません")
             except Exception as e:
-                print(f"❌ 通知送信エラー: {e}")
-
+                print(f"❌ 通知エラー: {e}")
+                
 @bot.tree.command(name="register", description="通知先登録")
 async def register(interaction: discord.Interaction, user: discord.Member, channel: discord.TextChannel):
     await interaction.response.defer(ephemeral=True)
