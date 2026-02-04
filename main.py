@@ -257,19 +257,21 @@ async def status(interaction: discord.Interaction, member: discord.Member = None
 
 @bot.tree.command(name="report", description="レポート作成")
 async def report(interaction: discord.Interaction, member: discord.Member = None):
-    # 1. 3秒ルール回避のため、まず最初に呼び出す
+    # ★ここが重要：関数の「一番最初」に持ってくる
     await interaction.response.defer() 
     
     target = member or interaction.user
     try:
-        # 2. 重い処理（カレンダー取得・グラフ作成）を実行
+        # 重い処理（グラフ作成など）
         embed, file = await create_report_data(target, f"📑 レポート: {target.display_name}")
-        # 3. deferした後は followup.send を使う
+        # deferした後は、response.send_message ではなく followup.send を使う
         await interaction.followup.send(embed=embed, file=file)
     except Exception as e:
-        print(f"❌ レポート作成エラー: {e}")
-        # エラーが起きてもユーザーに返信する
-        await interaction.followup.send("❌ レポートの作成に失敗しました。カレンダーのデータがあるか確認してください。")
+        print(f"❌ エラー発生: {e}")
+        try:
+            await interaction.followup.send("❌ データ取得に時間がかかりすぎたか、エラーが発生しました。")
+        except:
+            pass
 
 if __name__ == "__main__":
     Thread(target=run_flask).start()
