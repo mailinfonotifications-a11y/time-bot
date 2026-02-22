@@ -94,15 +94,29 @@ async def get_activity_data_from_calendar(start_dt, end_dt, user_id):
     except Exception as e:
         print(f"❌ カレンダー取得エラー: {e}")
         return {i: 0 for i in range(24)}, {"Online": 0, "Idle": 0, "DND": 0}, 0
+        
+# --- カウント管理用の辞書をグローバルに定義 ---
+report_counts = {}
 
-async def create_report_data(user, title_prefix):
+async def create_report_data(user, title_prefix, is_periodic=False):
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # 今日のデータ取得
+    # --- カウント処理 ---
+    user_key = f"{user.name}_{user.id}"
+    if user_key not in report_counts:
+        report_counts[user_key] = 1
+    current_count = report_counts[user_key]
+    report_counts[user_key] += 1
+
+    # ファイル名の生成
+    if is_periodic:
+        filename = f"graph_{user.name}_periodic_{current_count}.png"
+    else:
+        filename = f"graph_{user.name}_{current_count}.png"
+
+    # --- データ取得・計算ロジック (変更なし) ---
     today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now, user.id)
-    
-    # 継続中のセッションを今日のデータに加算
     if user.id in user_status_start:
         info = user_status_start[user.id]
         st_eng = {"online": "Online", "idle": "Idle", "dnd": "DND"}.get(info['status'])
@@ -117,16 +131,14 @@ async def create_report_data(user, title_prefix):
                     today_hourly[it.hour] += (min(now, next_h) - it).total_seconds()
                     it = min(now, next_h)
 
-    # 過去14日間のデータを取得（今日の日付から遡って14日間分）
-    hist_start = today_start - datetime.timedelta(days=13) # 今日を含めて14日間
-    hist_hourly, _, _ = await get_activity_data_from_calendar(hist_start, now, user.id)
+    hist_start = today_start - datetime.timedelta(days=13) 
+    hist_hourly_total, _, _ = await get_activity_data_from_calendar(hist_start, now, user.id)
     
-    # 「活動日」に関わらず、一律で14で割って平均を算出
     divisor = 14
-    avg_hourly = {i: (hist_hourly[i] / divisor) for i in range(24)}
-    avg_total_day = sum(avg_hourly.values())
+    avg_hourly = {i: (hist_hourly_total[i] / divisor) for i in range(24)}
+    avg_total_until_now = sum(hist_hourly_total.values()) / divisor
 
-    # --- グラフ ---
+    # --- グラフ描画 ---
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='#0b0e14')
     ax.set_facecolor('#0b0e14')
@@ -140,30 +152,32 @@ async def create_report_data(user, title_prefix):
     ax.set_xticks(range(24)); ax.tick_params(axis='both', colors='#b9bbbe', labelsize=9)
     ax.grid(axis='y', color='#2f3136', linestyle='-', alpha=0.3, zorder=0)
     for spine in ax.spines.values(): spine.set_visible(False)
-    ax.legend(frameon=False, loc='upper left', prop={'size': 10}) # 凡例も日本語
+    ax.legend(frameon=False, loc='upper left')
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png', facecolor='#0b0e14', bbox_inches='tight', dpi=120); buf.seek(0); plt.close()
 
     total_today = sum(today_status.values())
-    eff_val = (total_today / avg_total_day * 100) if avg_total_day > 0 else 0
+    eff_val = (total_today / avg_total_until_now * 100) if avg_total_until_now > 0 else 0
     
     embed = discord.Embed(title=title_prefix, color=0x5865F2, timestamp=now)
-    embed.add_field(name="📊 活動効率", value=f"直近14日平均の **{eff_val:.1f}%**" if avg_total_day > 0 else "データ収集中...", inline=False)
+    embed.add_field(name="📊 活動効率", value=f"同時刻の14日平均に対して **{eff_val:.1f}%**" if avg_total_until_now > 0 else "データ収集中...", inline=False)
     embed.add_field(name="🟢 オンライン", value=format_time_jp(today_status["Online"]), inline=True)
     embed.add_field(name="🌙 退席中", value=format_time_jp(today_status["Idle"]), inline=True)
     embed.add_field(name="⛔ 取り込み中", value=format_time_jp(today_status["DND"]), inline=True)
-    embed.add_field(name="⏱️ 今日これまでの合計", value=format_time_jp(total_today), inline=False)
-    embed.set_footer(text=f"平均は今日を含む直近14日間の全日数から算出")
-    embed.set_image(url="attachment://graph.png")
-    return embed, discord.File(buf, filename="graph.png")
+    embed.add_field(name="⏱️ 今日の総計", value=format_time_jp(total_today), inline=True)
+    embed.add_field(name="📈 平均の同時刻総計", value=format_time_jp(avg_total_until_now), inline=True)
+    
+    embed.set_footer(text=f"平均は今日を含む直近14日間の同時刻までのデータから算出")
+    # attachment:// の後の名前をfilename変数に合わせる
+    embed.set_image(url=f"attachment://{filename}")
+    return embed, discord.File(buf, filename=filename)
 
-# --- 定期レポート (23:57:30) ---
+# --- 定期レポートタスクの修正 ---
 @tasks.loop(seconds=10)
 async def daily_report_task():
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     if now.hour == 23 and now.minute == 57 and 30 <= now.second < 40:
-        print("⏰ 23:57:30: 自動レポート配信開始...")
         for key, channel_id in user_configs.items():
             try:
                 u_id, g_id = map(int, key.split('-'))
@@ -171,7 +185,8 @@ async def daily_report_task():
                 member = guild.get_member(u_id)
                 channel = bot.get_channel(channel_id)
                 if member and channel:
-                    embed, file = await create_report_data(member, f"📑 定期レポート: {member.display_name}")
+                    # is_periodic=True を指定
+                    embed, file = await create_report_data(member, f"📑 定期レポート: {member.display_name}", is_periodic=True)
                     await channel.send(embed=embed, file=file)
                     await asyncio.sleep(5)
             except: continue
@@ -279,9 +294,8 @@ async def report(interaction: discord.Interaction, member: discord.Member = None
     
     target = member or interaction.user
     try:
-        # 重い処理（グラフ作成など）
+        # デフォルトは is_periodic=False
         embed, file = await create_report_data(target, f"📑 レポート: {target.display_name}")
-        # deferした後は、response.send_message ではなく followup.send を使う
         await interaction.followup.send(embed=embed, file=file)
     except Exception as e:
         print(f"❌ エラー発生: {e}")
