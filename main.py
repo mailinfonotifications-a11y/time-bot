@@ -99,10 +99,10 @@ async def create_report_data(user, title_prefix):
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # 今日のデータ
+    # 今日のデータ取得
     today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now, user.id)
     
-    # 継続中のセッション
+    # 継続中のセッションを今日のデータに加算
     if user.id in user_status_start:
         info = user_status_start[user.id]
         st_eng = {"online": "Online", "idle": "Idle", "dnd": "DND"}.get(info['status'])
@@ -117,12 +117,12 @@ async def create_report_data(user, title_prefix):
                     today_hourly[it.hour] += (min(now, next_h) - it).total_seconds()
                     it = min(now, next_h)
 
-    # 過去14日間の「活動した日のみ」の平均
-    hist_start = today_start - datetime.timedelta(days=14)
-    hist_hourly, _, active_days = await get_activity_data_from_calendar(hist_start, today_start, user.id)
+    # 過去14日間のデータを取得（今日の日付から遡って14日間分）
+    hist_start = today_start - datetime.timedelta(days=13) # 今日を含めて14日間
+    hist_hourly, _, _ = await get_activity_data_from_calendar(hist_start, now, user.id)
     
-    # 活動した日が1日もなければ分母を1にする
-    divisor = max(active_days, 1)
+    # 「活動日」に関わらず、一律で14で割って平均を算出
+    divisor = 14
     avg_hourly = {i: (hist_hourly[i] / divisor) for i in range(24)}
     avg_total_day = sum(avg_hourly.values())
 
@@ -131,16 +131,16 @@ async def create_report_data(user, title_prefix):
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='#0b0e14')
     ax.set_facecolor('#0b0e14')
     
-    ax.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='Today', width=0.7, alpha=0.9, zorder=3)
-    ax.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label=f'Avg ({active_days} active days)', linewidth=2, markersize=5, zorder=4)
+    ax.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='今日', width=0.7, alpha=0.9, zorder=3)
+    ax.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label='14日間平均', linewidth=2, markersize=5, zorder=4)
     
-    ax.set_title(f"ACTIVITY ANALYSIS: @{user.name}", color='white', pad=20, fontsize=16, fontweight='bold')
-    ax.set_xlabel("Time (24h)", color='#b9bbbe', fontsize=11)
-    ax.set_ylabel("Stay Time (min)", color='#b9bbbe', fontsize=11)
+    ax.set_title(f"活動分析: @{user.name}", color='white', pad=20, fontsize=16, fontweight='bold')
+    ax.set_xlabel("時間 (24h)", color='#b9bbbe', fontsize=11)
+    ax.set_ylabel("滞在時間 (分)", color='#b9bbbe', fontsize=11)
     ax.set_xticks(range(24)); ax.tick_params(axis='both', colors='#b9bbbe', labelsize=9)
     ax.grid(axis='y', color='#2f3136', linestyle='-', alpha=0.3, zorder=0)
     for spine in ax.spines.values(): spine.set_visible(False)
-    ax.legend(frameon=False, loc='upper left')
+    ax.legend(frameon=False, loc='upper left', prop={'size': 10}) # 凡例も日本語
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png', facecolor='#0b0e14', bbox_inches='tight', dpi=120); buf.seek(0); plt.close()
@@ -149,12 +149,12 @@ async def create_report_data(user, title_prefix):
     eff_val = (total_today / avg_total_day * 100) if avg_total_day > 0 else 0
     
     embed = discord.Embed(title=title_prefix, color=0x5865F2, timestamp=now)
-    embed.add_field(name="📊 活動効率", value=f"活動日平均の **{eff_val:.1f}%**" if avg_total_day > 0 else "データ収集中...", inline=False)
+    embed.add_field(name="📊 活動効率", value=f"直近14日平均の **{eff_val:.1f}%**" if avg_total_day > 0 else "データ収集中...", inline=False)
     embed.add_field(name="🟢 オンライン", value=format_time_jp(today_status["Online"]), inline=True)
     embed.add_field(name="🌙 退席中", value=format_time_jp(today_status["Idle"]), inline=True)
     embed.add_field(name="⛔ 取り込み中", value=format_time_jp(today_status["DND"]), inline=True)
     embed.add_field(name="⏱️ 今日これまでの合計", value=format_time_jp(total_today), inline=False)
-    embed.set_footer(text=f"平均は過去14日間のうち活動があった{active_days}日間から算出")
+    embed.set_footer(text=f"平均は今日を含む直近14日間の全日数から算出")
     embed.set_image(url="attachment://graph.png")
     return embed, discord.File(buf, filename="graph.png")
 
