@@ -102,21 +102,17 @@ async def create_report_data(user, title_prefix, is_periodic=False):
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # --- カウント処理 ---
-    user_key = f"{user.name}_{user.id}"
-    if user_key not in report_counts:
-        report_counts[user_key] = 1
+    # --- ファイル名管理 ---
+    user_key = f"{user.id}"
+    report_counts[user_key] = report_counts.get(user_key, 0) + 1
     current_count = report_counts[user_key]
-    report_counts[user_key] += 1
+    # キャッシュ対策のため実行ごとにユニークな名前を生成
+    filename = f"analysis_{user.id}_{'auto' if is_periodic else 'manual'}_{current_count}.png"
 
-    # ファイル名の生成
-    if is_periodic:
-        filename = f"graph_{user.name}_periodic_{current_count}.png"
-    else:
-        filename = f"graph_{user.name}_{current_count}.png"
-
-    # --- データ取得・計算ロジック (変更なし) ---
+    # --- データ取得ロジック ---
     today_hourly, today_status, _ = await get_activity_data_from_calendar(today_start, now, user.id)
+    
+    # 現在進行中のステータスをリアルタイム反映
     if user.id in user_status_start:
         info = user_status_start[user.id]
         st_eng = {"online": "Online", "idle": "Idle", "dnd": "DND"}.get(info['status'])
@@ -131,46 +127,66 @@ async def create_report_data(user, title_prefix, is_periodic=False):
                     today_hourly[it.hour] += (min(now, next_h) - it).total_seconds()
                     it = min(now, next_h)
 
+    # 過去14日間の平均データ
     hist_start = today_start - datetime.timedelta(days=13) 
     hist_hourly_total, _, _ = await get_activity_data_from_calendar(hist_start, now, user.id)
     
     divisor = 14
     avg_hourly = {i: (hist_hourly_total[i] / divisor) for i in range(24)}
-    avg_total_until_now = sum(hist_hourly_total.values()) / divisor
+    
+    # 【正確な分析】現在時刻までの「平均累計」を算出
+    avg_total_until_now_sec = sum(avg_hourly[i] for i in range(now.hour + 1)) 
+    total_today_sec = sum(today_status.values())
+    efficiency = (total_today_sec / avg_total_until_now_sec * 100) if avg_total_until_now_sec > 0 else 0
 
-    # --- グラフ描画 ---
+    # --- グラフ描画 (ここだけ英語) ---
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='#0b0e14')
     ax.set_facecolor('#0b0e14')
     
-    ax.bar(range(24), [today_hourly[i]/60 for i in range(24)], color='#5865F2', label='今日', width=0.7, alpha=0.9, zorder=3)
-    ax.plot(range(24), [avg_hourly[i]/60 for i in range(24)], color='#FEE75C', marker='o', label='14日間平均', linewidth=2, markersize=5, zorder=4)
+    hours = range(24)
+    today_min = [today_hourly[i]/60 for i in hours]
+    avg_min = [avg_hourly[i]/60 for i in hours]
+
+    # Bar: Today / Line: 14-Day Avg
+    ax.bar(hours, today_min, color='#5865F2', label='Today', width=0.7, alpha=0.8, zorder=3)
+    ax.plot(hours, avg_min, color='#FEE75C', marker='o', label='14-Day Average', linewidth=2, markersize=4, zorder=4)
     
-    ax.set_title(f"活動分析: @{user.name}", color='white', pad=20, fontsize=16, fontweight='bold')
-    ax.set_xlabel("時間 (24h)", color='#b9bbbe', fontsize=11)
-    ax.set_ylabel("滞在時間 (分)", color='#b9bbbe', fontsize=11)
-    ax.set_xticks(range(24)); ax.tick_params(axis='both', colors='#b9bbbe', labelsize=9)
-    ax.grid(axis='y', color='#2f3136', linestyle='-', alpha=0.3, zorder=0)
-    for spine in ax.spines.values(): spine.set_visible(False)
-    ax.legend(frameon=False, loc='upper left')
+    # グラフ内テキストを英語に設定
+    ax.set_title(f"Activity Analysis: @{user.name}", color='white', pad=20, fontsize=15, fontweight='bold')
+    ax.set_xlabel("Hour of Day (24h)", color='#b9bbbe', fontsize=10)
+    ax.set_ylabel("Duration (Minutes)", color='#b9bbbe', fontsize=10)
+    
+    ax.set_xticks(hours)
+    ax.tick_params(axis='both', colors='#b9bbbe', labelsize=9)
+    ax.grid(axis='y', color='#2f3136', linestyle='--', alpha=0.3, zorder=0)
+    
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    
+    ax.legend(frameon=False, loc='upper left', fontsize=9)
     
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor='#0b0e14', bbox_inches='tight', dpi=120); buf.seek(0); plt.close()
+    plt.savefig(buf, format='png', facecolor='#0b0e14', bbox_inches='tight', dpi=120)
+    buf.seek(0)
+    plt.close()
 
-    total_today = sum(today_status.values())
-    eff_val = (total_today / avg_total_until_now * 100) if avg_total_until_now > 0 else 0
-    
+    # --- Embed構成 (ここは日本語) ---
     embed = discord.Embed(title=title_prefix, color=0x5865F2, timestamp=now)
-    embed.add_field(name="📊 活動効率", value=f"同時刻の14日平均に対して **{eff_val:.1f}%**" if avg_total_until_now > 0 else "データ収集中...", inline=False)
+    
+    # 効率の判定
+    eff_emoji = "🔥" if efficiency > 110 else "💤" if efficiency < 50 else "📊"
+    
+    embed.add_field(name="📈 活動効率", value=f"同時刻の14日平均に対して **{efficiency:.1f}%** {eff_emoji}", inline=False)
     embed.add_field(name="🟢 オンライン", value=format_time_jp(today_status["Online"]), inline=True)
     embed.add_field(name="🌙 退席中", value=format_time_jp(today_status["Idle"]), inline=True)
     embed.add_field(name="⛔ 取り込み中", value=format_time_jp(today_status["DND"]), inline=True)
-    embed.add_field(name="⏱️ 今日の総計", value=format_time_jp(total_today), inline=True)
-    embed.add_field(name="📈 平均の同時刻総計", value=format_time_jp(avg_total_until_now), inline=True)
+    embed.add_field(name="⏱️ 今日の総計", value=format_time_jp(total_today_sec), inline=True)
+    embed.add_field(name="📋 平均の同時刻総計", value=format_time_jp(avg_total_until_now_sec), inline=True)
     
-    embed.set_footer(text=f"平均は今日を含む直近14日間の同時刻までのデータから算出")
-    # attachment:// の後の名前をfilename変数に合わせる
+    embed.set_footer(text="平均は今日を含む直近14日間の同時刻までのデータから算出")
     embed.set_image(url=f"attachment://{filename}")
+    
     return embed, discord.File(buf, filename=filename)
 
 # --- 定期レポートタスクの修正 ---
